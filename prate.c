@@ -18,6 +18,7 @@ typedef int BOOL;
 #define ERR_INV_PROCNUM 2
 #define ERR_INV_FORMAT 3
 #define ERR_FAILED_EXEC 4
+int isBlocked = FALSE;
 char filename[9] = "20092318\0";
 extern int opterr, optind;
 extern char *optarg;
@@ -181,13 +182,18 @@ void prate_gen (int percent, int procCnt, BOOL desc) {
 	act_new.sa_flags |= SA_NOCLDSTOP;
 	sigemptyset (&act_new.sa_mask);
 	//오류나는부분 시작(************
-	/*
-	if (sigaction (SIGINT, &act_new, &act_old) == -1) {
+	sigaddset (&act_new.sa_mask, SIGINT);
+	sigaddset (&act_new.sa_mask, SIGTERM);
+
+	act_old.sa_handler = &hdl_parent;
+	act_old.sa_flags |= SA_NOCLDSTOP;
+	sigemptyset (&act_old.sa_mask);
+	if (sigaction (SIGINT, &act_old, NULL) == -1) {
 		failed = TRUE;
 	}
-	else if(sigaction (SIGTERM, &act_new, &act_old) == -1) {
+	else if(sigaction (SIGTERM, &act_old, NULL) == -1) {
 		failed = TRUE;
-	}*/
+	}
 	// 오류나는부분 끝*********
 
 	// 자식프로세스 시그널핸들러 설정
@@ -195,6 +201,10 @@ void prate_gen (int percent, int procCnt, BOOL desc) {
 	sigemptyset (&act_child_new.sa_mask);
 	sigaddset (&act_child_new.sa_mask, SIGINT);
 	sigaddset (&act_child_new.sa_mask, SIGTERM);
+
+	act_child_old.sa_handler = &hdl_child;
+	sigemptyset (&act_child_old.sa_mask);
+
 
 
 	for (i = 0; i < procCnt && !failed; )
@@ -204,10 +214,10 @@ void prate_gen (int percent, int procCnt, BOOL desc) {
 			//child
 			if (pid_c[ j ]  == 0) {
 				//오류나는부분 시작(************
-				if (sigaction (SIGINT, &act_child_new, &act_old) == -1) {
+				if (sigaction (SIGINT, &act_child_old, NULL) == -1) {
 					failed = TRUE;
 				}
-				else if(sigaction (SIGTERM, &act_child_new, &act_old) == -1) {
+				else if(sigaction (SIGTERM, &act_child_old, NULL) == -1) {
 					failed = TRUE;
 				}
 				// 오류나는부분 끝*********
@@ -254,7 +264,6 @@ void prate_gen (int percent, int procCnt, BOOL desc) {
 			if ((sigprocmask (SIG_UNBLOCK, &act_child_new.sa_mask, NULL)) == -1) {
 				exit(EXIT_FAILURE);
 			}
-			MSG("성공\n");
 
 			exit(EXIT_SUCCESS);
 		}
@@ -266,6 +275,8 @@ void prate_gen (int percent, int procCnt, BOOL desc) {
 			//자식 프로세스로부터 기록된 반환을 대기하고 출력
 			// MAX_FORK_CNT만큼의 자식을 생성하고, 그 자식들의 결과를 받아 출력
 			// 자식 한개 단위로 신호를 블록
+			//수행결과 기록파일 열기
+			while ((fp = fopen(filename, "r"))== NULL);
 			for (j = 0; j < MAX_FORK_CNT ; j++) {
 				int stat;
 				//시그널처리를 블록화
@@ -273,6 +284,7 @@ void prate_gen (int percent, int procCnt, BOOL desc) {
 					failed = TRUE;
 					break;
 				}
+			
 				// 자식 프로세스가 종료되기를 기다리고 pid를 받아온다.
 				pid_returned = wait(&stat);
 				if (pid_returned == -1) {
@@ -290,8 +302,6 @@ void prate_gen (int percent, int procCnt, BOOL desc) {
 					printf("신호%d\n", readCnt);
 				}*/
 				else {
-					//수행결과 기록파일 열기
-					while ((fp = fopen(filename, "r"))== NULL);
 					readCnt = fscanf (fp, "%c", &buf[j]);
 				}
 				//읽은 정보 기록
@@ -308,21 +318,17 @@ void prate_gen (int percent, int procCnt, BOOL desc) {
 				if (buf[ j ] == '1')
 					succCnt++;
 				// MAX_FORK_CNT childs ended
-				fclose (fp);
-				MSG("통과\n");
+				/* 오류나는부분 2************
+				//시그널처리를 un블록화
 				if ((sigprocmask (SIG_UNBLOCK, &act_new.sa_mask, NULL)) == -1) {
 					failed = TRUE;
 					break;
-				}
-				/*
-				if (sigaction (SIGINT, &act_new, &act_old) == -1) {
-					failed = TRUE;
-				}
-				else if(sigaction (SIGTERM, &act_new, &act_old) == -1) {
-					failed = TRUE;
-				}
-				*/
+				} */
+				MSG("종료\n");
+				fflush(stdout);
+				sleep(1);
 			}
+			fclose (fp);
 		}
 	}
 	//세마포어 키 반납
@@ -347,11 +353,11 @@ void prate_gen (int percent, int procCnt, BOOL desc) {
 }
 
 void hdl_parent (int signal) {
-	MSG("sig:%d pid:%d\n", signal, getpid());
-	
+	MSG("sig:%d pid:%d : %d\n", signal, getpid(), isBlocked);
+	MSG("asdf\n");
 
 }
 void hdl_child (int signal) {
-	MSG("chuild hdl\n");
+	MSG("child hdl: %d\n", isBlocked);
 
 }
