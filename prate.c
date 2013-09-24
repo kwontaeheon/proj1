@@ -17,12 +17,15 @@ typedef int BOOL;
 #define ERR_INV_PERCENT 1
 #define ERR_INV_PROCNUM 2
 #define ERR_INV_FORMAT 3
-#define ERR_FAILED_EXEC 4
-int isBlocked = FALSE;
 char filename[9] = "20092318\0";
 extern int opterr, optind;
 extern char *optarg;
 extern int optopt;
+BOOL FORKED = FALSE;
+BOOL desc = FALSE;
+int succCnt = 0, forkedCnt = 0, procCnt = -1;
+int forkIndex = -1;
+FILE *fp = NULL;
 // 세마포어 
 union semun
 {
@@ -31,16 +34,18 @@ union semun
 	unsigned short int *array;
 };
 static int semid;//semaphore id
+union semun sem_union;
+void err_print(int errcode);
+void print_succ_result();
 void hdl_parent(int signal);
 void hdl_child (int signal);
 BOOL isCorrectInt (char *pstr);
-void prate_gen(int percent, int procCnt, BOOL desc);
+void prate_gen(int percent);
 BOOL pmanipulator (int percent);
 
 int main(int argc, char **argv, char **env) {
 	int param_opt, first_op, num, errcode = 0;
-	int percent=-1, procCnt=-1;
-	BOOL desc = FALSE;
+	int percent=-1;
 	BOOL correct_stmt = TRUE;
 	opterr = 0;
 
@@ -99,18 +104,22 @@ int main(int argc, char **argv, char **env) {
 			errcode = ERR_INV_FORMAT;
 			correct_stmt = FALSE;
 		}
+		else if ( argv[optind+1] ){
+			errcode = 0;
+			correct_stmt = FALSE;
+		}
 		else {
 			procCnt = atoi(argv[ optind] );
 		}
 	}
 
 	if (!correct_stmt) {
-		MSG("%d\n", errcode);
+		err_print(errcode);
 	}
 	else {
-		MSG("correct stmt\n");
-		MSG("percent:%d procCnt:%d\n", percent, procCnt);
-		prate_gen (percent, procCnt, desc);
+		//MSG("correct stmt\n");
+		//MSG("percent:%d procCnt:%d\n", percent, procCnt);
+		prate_gen (percent);
 	}
 	return 0;
 }
@@ -160,11 +169,10 @@ BOOL isCorrectInt (char *pstr) {
 	return res;
 }
 
-void prate_gen (int percent, int procCnt, BOOL desc) {
+void prate_gen (int percent) {
 	int i, j;
-	FILE *fp = NULL;
 	BOOL child = FALSE, res = FALSE, failed = FALSE;
-	int succCnt = 0, readCnt = 0;
+	int readCnt = 0;
 	char buf[ MAX_FORK_CNT ] = {0, };
 	pid_t pid_c[ MAX_FORK_CNT ];
 	pid_t pid_returned;
@@ -172,29 +180,35 @@ void prate_gen (int percent, int procCnt, BOOL desc) {
 	struct sembuf mysem_open = {0, -1, SEM_UNDO};	//세마포어 얻기
 	struct sembuf mysem_close = {0, 1, SEM_UNDO};	//세마포어 돌려주기
 	int sem_num = 1;	//부모 프로세스는 생성자
-	union semun sem_union;
 	//세마포어 설정
 	while ((semid = semget((key_t)1234, sem_num, 0666|IPC_CREAT) ) == -1 );
 	
 	struct sigaction act_new, act_old, act_child_new, act_child_old;
 	// 부모프로세스 시그널핸들러
 	act_new.sa_handler = &hdl_parent;
-	act_new.sa_flags |= SA_NOCLDSTOP;
 	sigemptyset (&act_new.sa_mask);
-	//오류나는부분 시작(************
 	sigaddset (&act_new.sa_mask, SIGINT);
 	sigaddset (&act_new.sa_mask, SIGTERM);
 
+	
+	/*
 	act_old.sa_handler = &hdl_parent;
-	act_old.sa_flags |= SA_NOCLDSTOP;
 	sigemptyset (&act_old.sa_mask);
 	if (sigaction (SIGINT, &act_old, NULL) == -1) {
 		failed = TRUE;
 	}
 	else if(sigaction (SIGTERM, &act_old, NULL) == -1) {
 		failed = TRUE;
+	}*/
+	
+	if (signal (SIGINT, &hdl_parent) == SIG_ERR) {
+		failed = TRUE;
 	}
-	// 오류나는부분 끝*********
+	if (signal (SIGTERM, &hdl_parent) == SIG_ERR) {
+		failed = TRUE;
+	}
+	
+
 
 	// 자식프로세스 시그널핸들러 설정
 	act_child_new.sa_handler = &hdl_child;
@@ -211,16 +225,15 @@ void prate_gen (int percent, int procCnt, BOOL desc) {
 	{
 		for (j = 0; j < MAX_FORK_CNT && i < procCnt; j++, i++) {
 			pid_c[ j ] = fork();
+			forkedCnt++;
 			//child
 			if (pid_c[ j ]  == 0) {
-				//오류나는부분 시작(************
 				if (sigaction (SIGINT, &act_child_old, NULL) == -1) {
 					failed = TRUE;
 				}
 				else if(sigaction (SIGTERM, &act_child_old, NULL) == -1) {
 					failed = TRUE;
 				}
-				// 오류나는부분 끝*********
 				child = TRUE;
 				break;
 			} else if (pid_c[ j ] == -1) {
@@ -236,7 +249,6 @@ void prate_gen (int percent, int procCnt, BOOL desc) {
 			sem_num = 0;	//자식 프로세스는 소비자
 			res = pmanipulator(percent);
 			usleep (rand() % 200000);	//자식프로세스가 무작위 순으로 반환
-			usleep (rand() % 500000);
 			//세마포어 설정
 			while ((semid = semget((key_t)1234, sem_num, IPC_CREAT )) == -1 );
 			//세마포어 초기화
@@ -277,14 +289,14 @@ void prate_gen (int percent, int procCnt, BOOL desc) {
 			// 자식 한개 단위로 신호를 블록
 			//수행결과 기록파일 열기
 			while ((fp = fopen(filename, "r"))== NULL);
-			for (j = 0; j < MAX_FORK_CNT ; j++) {
+			FORKED = TRUE;
+			for (forkIndex = 0; forkIndex < MAX_FORK_CNT ; ) {
 				int stat;
 				//시그널처리를 블록화
 				if ((sigprocmask (SIG_BLOCK, &act_new.sa_mask, NULL)) == -1) {
 					failed = TRUE;
 					break;
 				}
-			
 				// 자식 프로세스가 종료되기를 기다리고 pid를 받아온다.
 				pid_returned = wait(&stat);
 				if (pid_returned == -1) {
@@ -294,15 +306,9 @@ void prate_gen (int percent, int procCnt, BOOL desc) {
 					//자식 프로세스가 비정상적으로 종료되었을 경우 오류
 					failed = TRUE;
 					break;
-				}/*
-				else if (WIFSIGNALED(stat)) {
-					// 자식 프로세스가 신호에 의해 종료되었을 경우
-					readCnt = fscanf (fp, "%c", &buf[j]);
-
-					printf("신호%d\n", readCnt);
-				}*/
+				}
 				else {
-					readCnt = fscanf (fp, "%c", &buf[j]);
+					readCnt = fscanf (fp, "%c", &buf[forkIndex]);
 				}
 				//읽은 정보 기록
 				if (readCnt == -1) {
@@ -312,52 +318,118 @@ void prate_gen (int percent, int procCnt, BOOL desc) {
 				else if (desc) {
 					MSG("PID %d returned %s.\n"
 							, pid_returned
-							, buf[ j ]=='1'?"success":"failure"
+							, buf[ forkIndex ]=='1'?"success":"failure"
 					   );
 				}
-				if (buf[ j ] == '1')
+				if (buf[ forkIndex ] == '1')
 					succCnt++;
 				// MAX_FORK_CNT childs ended
-				/* 오류나는부분 2************
+
+				forkIndex++;
+#ifdef SLEEP_PARENT
+				usleep(500000);
+#endif
 				//시그널처리를 un블록화
 				if ((sigprocmask (SIG_UNBLOCK, &act_new.sa_mask, NULL)) == -1) {
 					failed = TRUE;
 					break;
-				} */
-				MSG("종료\n");
-				fflush(stdout);
-				sleep(1);
+				} 
 			}
 			fclose (fp);
+			FORKED = FALSE;
 		}
 	}
 	//세마포어 키 반납
 	if (-1 == semctl (semid, 0, IPC_RMID, sem_union)) {
 		failed = TRUE;
+
 	}
 	// 부모 프로세스
 	if (failed) {
 		MSG("명령어 수행 실패\n");
 		exit(EXIT_FAILURE);
 	}
-	printf("succ:%d\n", succCnt);
-	float succ =  (float)succCnt / (float)procCnt;
-	succ *= 100;
-	MSG("Created %d processes.\n", procCnt);
-	MSG("Success: %d %%\n", (int)succ);
-	MSG("Failure: %d %%\n", 100 - (int)succ);
-	
+	print_succ_result();
 	//수행결과를 기록하던 파일을 삭제
 	unlink(filename);
 
 }
+void print_succ_result() {
+	float succ =  (float)succCnt / (float)forkedCnt;
+	succ *= 100;
+	MSG("Created %d processes.\n", forkedCnt);
+	MSG("Success: %d %%\n", (int)succ);
+	MSG("Failure: %d %%\n", 100 - (int)succ);
+	fflush(stdout);
+}
 
 void hdl_parent (int signal) {
-	MSG("sig:%d pid:%d : %d\n", signal, getpid(), isBlocked);
-	MSG("asdf\n");
+	int pid_child, stat, readCnt;
+	char buf[2] = {0, };
+	//MSG("sig:%d pid:%d \n", signal, getpid());
+	if (!FORKED) {
+		//MSG("fork()를 수행하기 전입니다.\n");
+		if (succCnt > 0) {
+			print_succ_result();
+		}
+		exit(EXIT_SUCCESS);
+	}
+	kill (0-getpid(), signal);
 
+	for (; forkIndex < MAX_FORK_CNT; forkIndex++) {
+		//pid_child = waitpid(-1, &stat, WNOHANG);
+		pid_child = wait(&stat);
+		if (WEXITSTATUS(stat) == EXIT_FAILURE) {
+			MSG("명령어 수행 실패\n");
+			exit(EXIT_FAILURE);
+		}
+		else {//if (WIFSIGNALED(stat)) { //자식프로세스가 신호에의해 종료되었을 경우
+			readCnt = fscanf (fp, "%c", &buf[0]);
+		}
+		if (readCnt == -1) {
+			MSG("명령어 수행 실패\n");
+			exit(EXIT_FAILURE);
+		}
+		else if (desc) {
+			MSG("PID %d returned %s.\n"
+					, pid_child
+					, buf[0] == '1'?"success":"failure"
+			   );
+		}
+		if (buf[ 0 ] == '1')
+			succCnt++;
+#ifdef SLEEP_PARENT
+		usleep(500000);
+#endif
+	}
+	fclose (fp);
+	if (-1 == semctl (semid, 0, IPC_RMID, sem_union)) {
+		MSG("명령어 수행 실패\n");
+		exit(EXIT_FAILURE);
+	}
+	print_succ_result();
+	unlink(filename);
+	exit(EXIT_SUCCESS);
+	
 }
 void hdl_child (int signal) {
-	MSG("child hdl: %d\n", isBlocked);
+	//MSG("child process\n");
+
+}
+void err_print(int errcode) {
+	switch (errcode) {
+		case FALSE:
+			MSG("적절한 인수 사용이 아닙니다.\n");
+			break;
+		case ERR_INV_PERCENT:
+			MSG("-p 옵션 사용이 잘못되었습니다.\n");
+			break;
+		case ERR_INV_PROCNUM:
+			MSG("자식프로세스 수는 정수만 가능합니다.\n");
+			break;
+		case ERR_INV_FORMAT:
+			MSG("명령어의 인자 형식이 잘못되었습니다.\n");
+			break;
+	}
 
 }
